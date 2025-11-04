@@ -1,29 +1,50 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 # Simple build-and-run script for the native Qt app.
-# This script ensures a predictable entrypoint for CI/orchestrators to avoid
-# "bash: -c: line 2: syntax error: unexpected end of file" when no command is provided.
+# Provides a predictable entrypoint for CI/orchestrators and avoids
+# "bash: -c: line 2: syntax error: unexpected end of file" from empty/partial commands.
+# This script is POSIX-compliant; if bash is needed it re-execs itself with bash.
 
-set -euo pipefail
+set -eu
 
-# Create and use build directory
-BUILD_DIR="$(dirname "$0")/build"
+# If invoked by a shell that lacks 'set -o pipefail' and we are on bash, enable it for robustness.
+if command -v bash >/dev/null 2>&1; then
+  # shellcheck disable=SC3040
+  if [ -n "${BASH_VERSION-}" ]; then
+    set -o pipefail
+  fi
+fi
+
+# Resolve script directory portably
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+BUILD_DIR="$SCRIPT_DIR/build"
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
+# Determine parallel build jobs in a portable manner
+JOBS=1
+if command -v nproc >/dev/null 2>&1; then
+  JOBS=$(nproc || echo 1)
+elif command -v getconf >/dev/null 2>&1; then
+  JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+fi
+case "$JOBS" in
+  ''|0) JOBS=1 ;;
+esac
+
 # Configure and build
 cmake -DCMAKE_BUILD_TYPE=Release ..
-cmake --build . -- -j"$(nproc)"
+# Use make/ninja job flags only if supported by the generator; pass via -- -jN is safe for Make
+cmake --build . -- -j"$JOBS" || cmake --build .
 
-# Run the app via the custom 'run' target configured in CMakeLists.txt
-# Falls back to executing the binary directly if needed.
+# Run via the custom 'run' target; if that fails, try to execute the binary directly.
 if cmake --build . --target run; then
-    exit 0
+  exit 0
 fi
 
 # Fallback run
-if [[ -x ./MainApp ]]; then
-    ./MainApp
+if [ -x "./MainApp" ]; then
+  ./MainApp
 else
-    echo "Error: Built binary not found. Expected ./MainApp"
-    exit 1
+  echo "Error: Built binary not found. Expected ./MainApp"
+  exit 1
 fi
