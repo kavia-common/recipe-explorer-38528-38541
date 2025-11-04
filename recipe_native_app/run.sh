@@ -36,15 +36,64 @@ cmake -DCMAKE_BUILD_TYPE=Release ..
 # Use make/ninja job flags only if supported by the generator; pass via -- -jN is safe for Make
 cmake --build . -- -j"$JOBS" || cmake --build .
 
-# Run via the custom 'run' target; if that fails, try to execute the binary directly.
-if cmake --build . --target run; then
-  exit 0
+# Decide how to run (headless-friendly).
+# Signals to force headless: RUN_HEADLESS=1 or DISPLAY is unset/empty.
+WANT_HEADLESS="${RUN_HEADLESS-}"
+if [ -z "${DISPLAY-}" ]; then
+  WANT_HEADLESS=1
 fi
 
-# Fallback run
-if [ -x "./MainApp" ]; then
-  ./MainApp
+run_mainapp_direct() {
+  if cmake --build . --target run; then
+    return 0
+  fi
+  if [ -x "./MainApp" ]; then
+    ./MainApp
+  else
+    echo "Error: Built binary not found. Expected ./MainApp"
+    return 1
+  fi
+}
+
+if [ "${WANT_HEADLESS:-0}" = "1" ]; then
+  # Prefer xvfb if available; otherwise try Qt offscreen/minimal platforms.
+  if command -v xvfb-run >/dev/null 2>&1; then
+    # Ensure XDG_RUNTIME_DIR to avoid warnings that can be treated as errors by some runners
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(id -u)}"
+    export XDG_RUNTIME_DIR
+    mkdir -p "$XDG_RUNTIME_DIR" || true
+    chmod 700 "$XDG_RUNTIME_DIR" || true
+    xvfb-run -a sh -lc 'cmake --build . --target run || ./MainApp'
+    exit $?
+  else
+    # Try offscreen first, then minimal as fallback
+    export QT_QPA_PLATFORM=offscreen
+    if run_mainapp_direct; then
+      exit 0
+    fi
+    export QT_QPA_PLATFORM=minimal
+    if run_mainapp_direct; then
+      exit 0
+    fi
+    echo "Failed to run in headless mode (no xvfb and offscreen/minimal failed)."
+    exit 1
+  fi
 else
-  echo "Error: Built binary not found. Expected ./MainApp"
-  exit 1
+  # Non-headless path (DISPLAY available) - run normally.
+  if run_mainapp_direct; then
+    exit 0
+  fi
+  # If normal run failed due to display, attempt a graceful fallback to headless.
+  if command -v xvfb-run >/dev/null 2>&1; then
+    echo "Display run failed, attempting headless fallback with xvfb-run..."
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(id -u)}"
+    export XDG_RUNTIME_DIR
+    mkdir -p "$XDG_RUNTIME_DIR" || true
+    chmod 700 "$XDG_RUNTIME_DIR" || true
+    xvfb-run -a sh -lc 'cmake --build . --target run || ./MainApp'
+    exit $?
+  else
+    echo "Display run failed and xvfb-run is not available. Try RUN_HEADLESS=1."
+    exit 1
+  fi
 fi
